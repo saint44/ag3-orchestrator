@@ -1,4 +1,4 @@
-// AG3 Orchestrator – Full Autonomous Mesh Version (ESM)
+// AG3 Orchestrator – Full Mesh Version (ESM)
 
 // Load environment variables
 import "dotenv/config";
@@ -17,13 +17,6 @@ const {
 
 const port = Number(PORT) || 4600;
 
-// Mask values in logs
-const mask = (val) => {
-  if (!val) return "MISSING";
-  if (val.length <= 8) return "SET";
-  return `${val.slice(0, 4)}***${val.slice(-4)}`;
-};
-
 console.log("🔐 Loaded ENV keys:", {
   PORT: port,
   NODE_ENV: NODE_ENV || "not set",
@@ -33,36 +26,29 @@ console.log("🔐 Loaded ENV keys:", {
   RENDER_SERVICE_ID: RENDER_SERVICE_ID || "MISSING",
 });
 
-// ---------- STRIPE CLIENT ----------
+// ---------- STRIPE SETUP ----------
 let stripe = null;
 if (STRIPE_SECRET_KEY) {
   stripe = new Stripe(STRIPE_SECRET_KEY, {
     apiVersion: "2024-06-20",
   });
-} else {
-  console.warn("⚠️ Stripe secret key missing — Stripe features disabled.");
 }
 
 // ---------- EXPRESS APP ----------
 const app = express();
 
-// MUST register webhook BEFORE JSON parser (Stripe needs raw body)
+// Stripe needs raw body
 app.post(
   "/webhook",
   express.raw({ type: "application/json" }),
   (req, res) => {
     if (!stripe || !STRIPE_WEBHOOK_SECRET) {
-      console.warn("⚠️ Stripe webhook secret not configured.");
       return res.status(500).send("Webhook not configured");
     }
 
     const sig = req.headers["stripe-signature"];
-    if (!sig) {
-      console.warn("⚠️ Missing stripe-signature header.");
-      return res.status(400).send("Missing stripe-signature header");
-    }
-
     let event;
+
     try {
       event = stripe.webhooks.constructEvent(
         req.body,
@@ -70,146 +56,160 @@ app.post(
         STRIPE_WEBHOOK_SECRET
       );
     } catch (err) {
-      console.error("❌ Stripe signature verification failed:", err.message);
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
-    console.log("✅ Stripe webhook received:", event.type);
+    console.log("✅ Stripe webhook:", event.type);
 
-    // TODO: Convert Stripe events → Missions
+    // Stripe → Mission mapping
     switch (event.type) {
       case "checkout.session.completed":
-        console.log("💰 Checkout complete:", event.data.object.id);
+        enqueueMission({
+          type: "onboard",
+          requiredCapability: "exec",
+          payload: event.data.object,
+        });
         break;
       case "invoice.paid":
-        console.log("📄 Invoice paid:", event.data.object.id);
+        enqueueMission({
+          type: "notify-payment",
+          requiredCapability: "broadcast",
+          payload: event.data.object,
+        });
         break;
-      case "customer.subscription.created":
-        console.log("🔁 Subscription created:", event.data.object.id);
-        break;
-      case "customer.subscription.updated":
-        console.log("🔁 Subscription updated:", event.data.object.id);
-        break;
-      case "payment_intent.succeeded":
-        console.log("💳 Payment succeeded:", event.data.object.id);
-        break;
-      default:
-        console.log("ℹ️ Unhandled event type:", event.type);
     }
 
     res.json({ received: true });
   }
 );
 
-// JSON parser for all other endpoints
+// JSON for everything else
 app.use(express.json());
 
 // ---------- AGENT REGISTRY ----------
 const agents = new Map();
 
-// POST /agents/register
+// Agent Register
 app.post("/agents/register", (req, res) => {
-  const { name, role, url, capabilities } = req.body || {};
+  const { name, role, capabilities } = req.body;
 
-  if (!name) {
-    return res.status(400).json({
-      ok: false,
-      error: "Agent name is required",
-    });
-  }
+  if (!name)
+    return res.status(400).json({ ok: false, error: "Agent name required" });
 
   const now = new Date().toISOString();
-  const previous = agents.get(name);
+  const existing = agents.get(name);
 
   const agent = {
     name,
-    role: role || null,
-    url: url || null,
-    capabilities: Array.isArray(capabilities) ? capabilities : [],
-    registeredAt: previous?.registeredAt || now,
+    role,
+    capabilities,
+    registeredAt: existing?.registeredAt || now,
     lastSeen: now,
   };
 
   agents.set(name, agent);
 
-  console.log(
-    `🤝 Agent registered: ${name}` +
-      (agent.role ? ` (role: ${agent.role})` : "") +
-      (agent.url ? ` @ ${agent.url}` : "")
-  );
-
-  return res.json({ ok: true, agent });
+  console.log("🤝 Agent registered:", agent);
+  res.json({ ok: true, agent });
 });
 
-// POST /agents/heartbeat
+// Agent Heartbeat
 app.post("/agents/heartbeat", (req, res) => {
-  const { name } = req.body || {};
+  const { name } = req.body;
 
-  if (!name || !agents.has(name)) {
-    return res.status(404).json({
-      ok: false,
-      error: "Unknown agent",
-      path: "/agents/heartbeat",
-    });
-  }
+  if (!name || !agents.has(name))
+    return res.status(404).json({ ok: false, error: "Unknown agent" });
 
-  const info = agents.get(name);
-  info.lastSeen = new Date().toISOString();
-  agents.set(name, info);
+  const agent = agents.get(name);
+  agent.lastSeen = new Date().toISOString();
+  agents.set(name, agent);
 
   console.log(`💓 Heartbeat from ${name}`);
-
-  return res.json({ ok: true });
+  res.json({ ok: true });
 });
 
-// GET /agents
+// GET agents
 app.get("/agents", (req, res) => {
-  const list = Array.from(agents.values());
-  res.json({ ok: true, count: list.length, agents: list });
+  res.json({ ok: true, count: agents.size, agents: [...agents.values()] });
 });
 
-// ---------- HEALTH CHECK ----------
+// ---------- MISSION STORE ----------
+let missions = [];
+let missionCounter = 0;
+
+function enqueueMission(m) {
+  const id = `mission-${Date.now()}-${missionCounter++}`;
+  const full = {
+    id,
+    status: "pending",
+    assignedTo: null,
+    createdAt: new Date().toISOString(),
+    ...m,
+  };
+  missions.push(full);
+  console.log("🛰️ Mission enqueued:", full);
+  return full;
+}
+
+// ---------- /missions (create mission) ----------
+app.post("/missions", (req, res) => {
+  const { type, requiredCapability, payload } = req.body;
+  const mission = enqueueMission({ type, requiredCapability, payload });
+  res.json({ ok: true, mission });
+});
+
+// ---------- /missions/next (agent polls) ----------
+app.post("/missions/next", (req, res) => {
+  const { name, capabilities } = req.body;
+
+  const mission = missions.find(
+    (m) =>
+      m.status === "pending" &&
+      capabilities.includes(m.requiredCapability)
+  );
+
+  if (!mission) return res.json({ ok: true, mission: null });
+
+  mission.status = "assigned";
+  mission.assignedTo = name;
+  mission.assignedAt = new Date().toISOString();
+
+  console.log(`🎯 Mission assigned to ${name}:`, mission);
+  res.json({ ok: true, mission });
+});
+
+// ---------- /missions/result ----------
+app.post("/missions/result", (req, res) => {
+  const { id, status, output } = req.body;
+
+  const m = missions.find((x) => x.id === id);
+  if (!m) return res.status(404).json({ ok: false });
+
+  m.status = status;
+  m.output = output;
+  m.completedAt = new Date().toISOString();
+
+  console.log(`✅ Mission complete: ${id}`, m);
+  res.json({ ok: true });
+});
+
+// ---------- HEALTH ----------
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
     status: "running",
     port,
     env: NODE_ENV,
-    stripeConfigured: Boolean(STRIPE_SECRET_KEY && STRIPE_WEBHOOK_SECRET),
+    stripeConfigured: Boolean(
+      STRIPE_SECRET_KEY && STRIPE_WEBHOOK_SECRET
+    ),
     agents: agents.size,
   });
 });
 
-// ---------- MISSIONS ----------
-app.post("/missions", async (req, res) => {
-  try {
-    const mission = req.body || {};
-    console.log("🛰️ Incoming mission:", JSON.stringify(mission, null, 2));
-
-    // TODO: choose best agent by capability
-    // Example:
-    // if (mission.type === "parse") route to AG4
-
-    return res.json({
-      ok: true,
-      message: "Mission received",
-    });
-  } catch (err) {
-    console.error("❌ Mission handler error:", err);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// ---------- 404 ----------
-app.use((req, res) =>
-  res.status(404).json({ ok: false, error: "Not found", path: req.path })
-);
-
 // ---------- START SERVER ----------
-app.listen(port, "0.0.0.0", () => {
-  console.log(
-    `🚀 AG3 Orchestrator running on PORT ${port} (NODE_ENV=${NODE_ENV})`
-  );
-});
+app.listen(port, "0.0.0.0", () =>
+  console.log(`🚀 AG3 Orchestrator running on PORT ${port}`)
+);
 
 export default app;

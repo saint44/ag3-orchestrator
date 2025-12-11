@@ -1,21 +1,19 @@
 {
   "name": "ag3-orchestrator",
   "version": "1.0.0",
-  "main": "src/index.js",
+  "description": "Infinity Nexus AG3 Orchestrator",
   "type": "module",
+  "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js"
   },
   "dependencies": {
-    "body-parser": "^1.20.2",
+    "axios": "^1.3.2",
+    "body-parser": "^1.20.4",
+    "chalk": "^5.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^4.18.2",
-    "node-fetch": "^3.3.2",
     "stripe": "^12.0.0"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": ""
+  }
 }

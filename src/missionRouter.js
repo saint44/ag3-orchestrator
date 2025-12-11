@@ -1,114 +1,93 @@
-// ===============================
-// MISSION ROUTING ENGINE (AG3)
-// ===============================
+// ===========================================
+// AG3 MISSION ROUTER
+// Converts Stripe events → AG3 automation tasks
+// ===========================================
 
-module.exports = async function missionRouter(stripeEvent) {
-  try {
-    const type = stripeEvent.type;
-    const data = stripeEvent.data?.object || {};
+module.exports = async function missionRouter(event) {
+  const type = event.type || "unknown";
+  const obj = event.data?.object || {};
 
-    console.log("🚀 Dispatching Mission for Event:", type);
+  switch (type) {
+    // --------------------------
+    // PAYMENT SUCCESS LOGIC
+    // --------------------------
+    case "payment_intent.succeeded":
+    case "checkout.session.completed":
+    case "charge.succeeded":
+    case "invoice.payment_succeeded":
+      return {
+        mission: "processPaymentSuccess",
+        data: {
+          amount: obj.amount || obj.amount_total || obj.amount_paid,
+          currency: obj.currency,
+          customer: obj.customer,
+          email: obj.customer_email,
+          status: obj.status,
+          paymentIntent: obj.id,
+          raw: obj
+        }
+      };
 
-    switch (type) {
-      // ------------------------------------
-      // PAYMENTS
-      // ------------------------------------
-      case "payment_intent.succeeded":
-        return {
-          mission: "activatePurchase",
-          payload: {
-            amount: data.amount,
-            currency: data.currency,
-            customer: data.customer,
-            payment_intent: data.id,
-          },
-        };
+    // --------------------------
+    // SUBSCRIPTION LOGIC
+    // --------------------------
+    case "customer.subscription.created":
+    case "customer.subscription.updated":
+      return {
+        mission: "handleSubscription",
+        data: {
+          subscriptionId: obj.id,
+          customer: obj.customer,
+          status: obj.status,
+          plan: obj.plan,
+          quantity: obj.quantity,
+          raw: obj
+        }
+      };
 
-      case "checkout.session.completed":
-        return {
-          mission: "checkoutCompleted",
-          payload: {
-            email: data.customer_details?.email,
-            amount_total: data.amount_total,
-            session: data.id,
-            payment_intent: data.payment_intent,
-          },
-        };
+    // --------------------------
+    // INVOICE EVENTS
+    // --------------------------
+    case "invoice.finalized":
+    case "invoice.paid":
+    case "invoice.payment_succeeded":
+      return {
+        mission: "processInvoice",
+        data: {
+          invoiceId: obj.id,
+          amountDue: obj.amount_due,
+          amountPaid: obj.amount_paid,
+          status: obj.status,
+          pdf: obj.invoice_pdf,
+          raw: obj
+        }
+      };
 
-      // ------------------------------------
-      // SUBSCRIPTIONS
-      // ------------------------------------
-      case "customer.subscription.created":
-        return {
-          mission: "createSubscriptionProfile",
-          payload: {
-            subscription_id: data.id,
-            customer: data.customer,
-            status: data.status,
-            plan: data.plan,
-            current_period_end: data.current_period_end,
-          },
-        };
+    // --------------------------
+    // CUSTOMER EVENTS
+    // --------------------------
+    case "customer.created":
+    case "customer.updated":
+      return {
+        mission: "handleCustomerUpdate",
+        data: {
+          customerId: obj.id,
+          email: obj.email,
+          name: obj.name,
+          raw: obj
+        }
+      };
 
-      case "customer.subscription.updated":
-        return {
-          mission: "updateSubscription",
-          payload: {
-            subscription_id: data.id,
-            customer: data.customer,
-            status: data.status,
-            plan: data.plan,
-          },
-        };
-
-      // ------------------------------------
-      // INVOICES
-      // ------------------------------------
-      case "invoice.payment_succeeded":
-      case "invoice.paid":
-        return {
-          mission: "invoicePaid",
-          payload: {
-            invoice_id: data.id,
-            amount: data.amount_paid,
-            customer: data.customer,
-            hosted_invoice_url: data.hosted_invoice_url,
-          },
-        };
-
-      // ------------------------------------
-      // CUSTOMERS
-      // ------------------------------------
-      case "customer.created":
-        return {
-          mission: "createCRMProfile",
-          payload: {
-            customer_id: data.id,
-            email: data.email,
-          },
-        };
-
-      case "customer.updated":
-        return {
-          mission: "updateCRMProfile",
-          payload: {
-            customer_id: data.id,
-            email: data.email,
-            changes: stripeEvent.data.previous_attributes,
-          },
-        };
-
-      // ------------------------------------
-      // DEFAULT CATCH
-      // ------------------------------------
-      default:
-        return {
-          mission: "logEvent",
-          payload: stripeEvent,
-        };
-    }
-  } catch (err) {
-    console.error("❌ Mission Router Error:", err);
-    return { mission: "error", payload: { message: err.message } };
+    // --------------------------
+    // DEFAULT / UNKNOWN
+    // --------------------------
+    default:
+      return {
+        mission: "logOnly",
+        data: {
+          type,
+          raw: obj
+        }
+      };
   }
 };

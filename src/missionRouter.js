@@ -1,93 +1,27 @@
-// ===========================================
-// AG3 MISSION ROUTER
-// Converts Stripe events → AG3 automation tasks
-// ===========================================
+/**
+ * AG3 FULL AUTOMATION — Mission Router
+ * This file receives Stripe events and forwards them to the Infinity Spine.
+ */
 
-module.exports = async function missionRouter(event) {
-  const type = event.type || "unknown";
-  const obj = event.data?.object || {};
+const axios = require("axios");
 
-  switch (type) {
-    // --------------------------
-    // PAYMENT SUCCESS LOGIC
-    // --------------------------
-    case "payment_intent.succeeded":
-    case "checkout.session.completed":
-    case "charge.succeeded":
-    case "invoice.payment_succeeded":
-      return {
-        mission: "processPaymentSuccess",
-        data: {
-          amount: obj.amount || obj.amount_total || obj.amount_paid,
-          currency: obj.currency,
-          customer: obj.customer,
-          email: obj.customer_email,
-          status: obj.status,
-          paymentIntent: obj.id,
-          raw: obj
-        }
-      };
+// The Infinity Spine AG3 mission endpoint (local or production)
+const MISSION_ENGINE_URL =
+  process.env.MISSION_ENGINE_URL || "http://localhost:4600/missions";
 
-    // --------------------------
-    // SUBSCRIPTION LOGIC
-    // --------------------------
-    case "customer.subscription.created":
-    case "customer.subscription.updated":
-      return {
-        mission: "handleSubscription",
-        data: {
-          subscriptionId: obj.id,
-          customer: obj.customer,
-          status: obj.status,
-          plan: obj.plan,
-          quantity: obj.quantity,
-          raw: obj
-        }
-      };
+async function routeMission(eventType, payload) {
+  try {
+    console.log(`🚀 Routing mission → ${eventType}`);
 
-    // --------------------------
-    // INVOICE EVENTS
-    // --------------------------
-    case "invoice.finalized":
-    case "invoice.paid":
-    case "invoice.payment_succeeded":
-      return {
-        mission: "processInvoice",
-        data: {
-          invoiceId: obj.id,
-          amountDue: obj.amount_due,
-          amountPaid: obj.amount_paid,
-          status: obj.status,
-          pdf: obj.invoice_pdf,
-          raw: obj
-        }
-      };
+    const res = await axios.post(MISSION_ENGINE_URL, {
+      eventType,
+      payload,
+    });
 
-    // --------------------------
-    // CUSTOMER EVENTS
-    // --------------------------
-    case "customer.created":
-    case "customer.updated":
-      return {
-        mission: "handleCustomerUpdate",
-        data: {
-          customerId: obj.id,
-          email: obj.email,
-          name: obj.name,
-          raw: obj
-        }
-      };
-
-    // --------------------------
-    // DEFAULT / UNKNOWN
-    // --------------------------
-    default:
-      return {
-        mission: "logOnly",
-        data: {
-          type,
-          raw: obj
-        }
-      };
+    console.log("✅ Mission routed successfully:", res.data);
+  } catch (err) {
+    console.error("❌ Mission routing failed:", err.response?.data || err);
   }
-};
+}
+
+module.exports = { routeMission };

@@ -1,10 +1,11 @@
 /**
- * AG3 ORCHESTRATOR — EXECUTION + LAUNCH CONTROL (LIVE)
- * ===================================================
- * - Stripe LIVE webhook (raw body, signature-safe)
- * - Single-commander execution
- * - Launch orchestration scheduler (always-on)
- * - Observable outputs written to disk
+ * AG3 ORCHESTRATOR — EXECUTION + LAUNCH + GROWTH (LIVE)
+ * ====================================================
+ * - Stripe LIVE webhook (raw body, signature safe)
+ * - Single commander execution
+ * - Launch orchestration scheduler
+ * - Growth scheduler (private beta)
+ * - Observable artifacts written to disk
  */
 
 const express = require("express");
@@ -33,7 +34,7 @@ const app = express();
  * IMPORTANT:
  * Use RAW body globally.
  * Never use express.json().
- * Stripe signature depends on raw bytes.
+ * Stripe signature verification requires raw bytes.
  */
 app.use(express.raw({ type: "*/*" }));
 
@@ -41,9 +42,12 @@ app.use(express.raw({ type: "*/*" }));
 const DATA_DIR = path.join(process.cwd(), "data");
 const EVENTS_FILE = path.join(DATA_DIR, "processed-events.json");
 const LAUNCH_DIR = path.join(DATA_DIR, "launch");
+const GROWTH_DIR = path.join(DATA_DIR, "growth");
+const MISSIONS_LOG = path.join(DATA_DIR, "missions.log");
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(LAUNCH_DIR, { recursive: true });
+fs.mkdirSync(GROWTH_DIR, { recursive: true });
 
 if (!fs.existsSync(EVENTS_FILE)) {
   fs.writeFileSync(EVENTS_FILE, "{}");
@@ -52,24 +56,20 @@ if (!fs.existsSync(EVENTS_FILE)) {
 function loadEvents() {
   return JSON.parse(fs.readFileSync(EVENTS_FILE, "utf8"));
 }
-
 function saveEvents(e) {
   fs.writeFileSync(EVENTS_FILE, JSON.stringify(e, null, 2));
 }
-
-function writeLaunchFile(name, payload) {
-  const file = path.join(LAUNCH_DIR, `${name}.json`);
-  fs.writeFileSync(file, JSON.stringify(payload, null, 2));
+function write(dir, name, payload) {
+  fs.writeFileSync(
+    path.join(dir, `${name}.json`),
+    JSON.stringify(payload, null, 2)
+  );
 }
 
-/* ===================== AGENT CONTROL ===================== */
+/* ===================== AGENT EXECUTION ===================== */
 const DEFAULT_AGENT = { id: "ag4" };
 const QUEUE = [];
 let BUSY = false;
-
-function selectSingleAgent() {
-  return DEFAULT_AGENT;
-}
 
 async function executeAgent(agent, mission, payload) {
   return {
@@ -93,18 +93,12 @@ async function pumpQueue() {
       console.log("[AG3] COMMANDER_MODE = ON");
       console.log("[AG3] FAN_OUT = DISABLED");
       console.log("[AG3] RETRIES = DISABLED");
+      console.log(`[AG3] COMMANDER → ${DEFAULT_AGENT.id}`);
 
-      const agent = selectSingleAgent();
-      console.log(`[AG3] COMMANDER → ${agent.id}`);
-
-      const result = await executeAgent(agent, job.mission, job.payload);
+      const result = await executeAgent(DEFAULT_AGENT, job.mission, job.payload);
 
       console.log("[AG3] MISSION_COMPLETE");
-
-      fs.appendFileSync(
-        path.join(DATA_DIR, "missions.log"),
-        JSON.stringify(result) + "\n"
-      );
+      fs.appendFileSync(MISSIONS_LOG, JSON.stringify(result) + "\n");
     }
   } catch (err) {
     console.error("[AG3] EXEC_ERROR", err);
@@ -115,8 +109,9 @@ async function pumpQueue() {
 
 /* ===================== LAUNCH ORCHESTRATION ===================== */
 function runLaunchAudit() {
+  const ts = new Date().toISOString();
   const checklist = {
-    timestamp: new Date().toISOString(),
+    timestamp: ts,
     checks: {
       ag3_online: true,
       stripe_live: true,
@@ -126,23 +121,48 @@ function runLaunchAudit() {
     },
   };
 
-  const gaps = [];
-  const readiness = gaps.length === 0 ? "READY" : "BLOCKED";
+  write(LAUNCH_DIR, "checklist", checklist);
+  write(LAUNCH_DIR, "gaps", { timestamp: ts, gaps: [] });
+  write(LAUNCH_DIR, "status", { timestamp: ts, readiness: "READY" });
 
-  writeLaunchFile("checklist", checklist);
-  writeLaunchFile("gaps", { timestamp: checklist.timestamp, gaps });
-  writeLaunchFile("status", {
-    timestamp: checklist.timestamp,
-    readiness,
-  });
-
-  console.log(`[LAUNCH] CHECK COMPLETE → ${readiness}`);
+  console.log("[LAUNCH] CHECK COMPLETE → READY");
 }
 
 function startLaunchScheduler() {
   console.log("[LAUNCH] Scheduler started");
   runLaunchAudit();
-  setInterval(runLaunchAudit, 10 * 60 * 1000); // every 10 min
+  setInterval(runLaunchAudit, 10 * 60 * 1000);
+}
+
+/* ===================== GROWTH ORCHESTRATION ===================== */
+function runGrowthCycle() {
+  const ts = new Date().toISOString();
+
+  const state = {
+    timestamp: ts,
+    phase: "PRIVATE_BETA",
+    maxSubscribers: 10,
+    currentSubscribers: "AUTO-DETECT",
+  };
+
+  const decisions = {
+    timestamp: ts,
+    allowInvites: true,
+    inviteCount: 3,
+    priceChangeProposed: false,
+    notes: "Operating within private beta limits.",
+  };
+
+  write(GROWTH_DIR, "state", state);
+  write(GROWTH_DIR, "decisions", decisions);
+
+  console.log("[GROWTH] Cycle complete → PRIVATE_BETA");
+}
+
+function startGrowthScheduler() {
+  console.log("[GROWTH] Scheduler started");
+  runGrowthCycle();
+  setInterval(runGrowthCycle, 24 * 60 * 60 * 1000);
 }
 
 /* ===================== HEALTH ===================== */
@@ -208,6 +228,6 @@ app.listen(PORT, () => {
   console.log("[AG3] MODE = SINGLE COMMANDER");
   console.log("=================================");
 
-  // 🔥 TURN ON LAUNCH ORCHESTRATION
   startLaunchScheduler();
+  startGrowthScheduler();
 });

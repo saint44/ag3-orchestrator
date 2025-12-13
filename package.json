@@ -1,22 +1,22 @@
 {
   "name": "ag3-orchestrator",
   "version": "1.0.0",
-  "description": "AG3 Orchestrator – Infinity Nexus",
+  "description": "AG3 Orchestrator - Infinity Nexus",
   "private": true,
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "axios": "^1.6.7",
+    "axios": "^1.6.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.18.2",
     "imap-simple": "^5.1.0",
     "mailparser": "^3.6.0",
     "stripe": "^20.0.0"
-  },
-  "engines": {
-    "node": ">=18"
   }
 }

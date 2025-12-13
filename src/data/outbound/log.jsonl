@@ -1,0 +1,5 @@
+{"timestamp":"2025-12-13T08:16:31.943Z","pillar":"automation_agency","action":"OUTBOUND_ATTEMPT","lead":{"email":"lead1765613791942_0@example.com","source":"seed"},"status":"QUEUED"}
+{"timestamp":"2025-12-13T08:16:31.943Z","pillar":"automation_agency","action":"OUTBOUND_ATTEMPT","lead":{"email":"lead1765613791942_1@example.com","source":"seed"},"status":"QUEUED"}
+{"timestamp":"2025-12-13T08:16:31.943Z","pillar":"automation_agency","action":"OUTBOUND_ATTEMPT","lead":{"email":"lead1765613791943_2@example.com","source":"seed"},"status":"QUEUED"}
+{"timestamp":"2025-12-13T08:16:31.943Z","pillar":"automation_agency","action":"OUTBOUND_ATTEMPT","lead":{"email":"lead1765613791943_3@example.com","source":"seed"},"status":"QUEUED"}
+{"timestamp":"2025-12-13T08:16:31.943Z","pillar":"automation_agency","action":"OUTBOUND_ATTEMPT","lead":{"email":"lead1765613791943_4@example.com","source":"seed"},"status":"QUEUED"}

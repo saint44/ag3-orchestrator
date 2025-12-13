@@ -1,0 +1,12 @@
+{
+  "timestamp": "2025-12-13T08:19:17.053Z",
+  "phase": "PRIVATE_BETA",
+  "maxSubscribers": 10,
+  "currentSubscribers": "AUTO-DETECT",
+  "actions": [
+    "IDENTIFY_NEXT_BETA_USERS",
+    "SEND_INVITE_RECOMMENDATIONS",
+    "MONITOR_CONVERSION",
+    "PREPARE_PRICE_INCREASE"
+  ]
+}

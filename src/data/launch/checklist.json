@@ -1,0 +1,10 @@
+{
+  "timestamp": "2025-12-13T08:19:17.052Z",
+  "checks": {
+    "ag3_online": true,
+    "stripe_live": true,
+    "webhook_live": true,
+    "single_commander": true,
+    "payment_flow_verified": true
+  }
+}

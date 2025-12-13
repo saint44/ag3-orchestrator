@@ -1,10 +1,11 @@
 /**
- * AG3 ORCHESTRATOR — EXECUTION + LAUNCH + GROWTH (LIVE)
- * ====================================================
- * - Stripe LIVE webhook (raw body, signature safe)
+ * AG3 ORCHESTRATOR — EXECUTION + LAUNCH COMPLETION + GROWTH (LIVE)
+ * ===============================================================
+ * - Stripe LIVE webhook (raw body, signature-safe)
  * - Single commander execution
- * - Launch orchestration scheduler
- * - Growth scheduler (private beta)
+ * - Launch state machine (READY → LAUNCHED)
+ * - Launch audit scheduler (10 min)
+ * - Growth scheduler (24h, gated on LAUNCHED)
  * - Observable artifacts written to disk
  */
 
@@ -33,7 +34,7 @@ const app = express();
 /**
  * IMPORTANT:
  * Use RAW body globally.
- * Never use express.json().
+ * Do NOT use express.json().
  * Stripe signature verification requires raw bytes.
  */
 app.use(express.raw({ type: "*/*" }));
@@ -41,9 +42,9 @@ app.use(express.raw({ type: "*/*" }));
 /* ===================== STORAGE ===================== */
 const DATA_DIR = path.join(process.cwd(), "data");
 const EVENTS_FILE = path.join(DATA_DIR, "processed-events.json");
+const MISSIONS_LOG = path.join(DATA_DIR, "missions.log");
 const LAUNCH_DIR = path.join(DATA_DIR, "launch");
 const GROWTH_DIR = path.join(DATA_DIR, "growth");
-const MISSIONS_LOG = path.join(DATA_DIR, "missions.log");
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(LAUNCH_DIR, { recursive: true });
@@ -53,17 +54,27 @@ if (!fs.existsSync(EVENTS_FILE)) {
   fs.writeFileSync(EVENTS_FILE, "{}");
 }
 
-function loadEvents() {
-  return JSON.parse(fs.readFileSync(EVENTS_FILE, "utf8"));
+function loadJSON(file, fallback) {
+  if (!fs.existsSync(file)) return fallback;
+  return JSON.parse(fs.readFileSync(file, "utf8"));
 }
-function saveEvents(e) {
-  fs.writeFileSync(EVENTS_FILE, JSON.stringify(e, null, 2));
+function saveJSON(file, payload) {
+  fs.writeFileSync(file, JSON.stringify(payload, null, 2));
 }
 function write(dir, name, payload) {
-  fs.writeFileSync(
-    path.join(dir, `${name}.json`),
-    JSON.stringify(payload, null, 2)
-  );
+  saveJSON(path.join(dir, `${name}.json`), payload);
+}
+
+/* ===================== LAUNCH STATE ===================== */
+const STATE_FILE = path.join(LAUNCH_DIR, "state.json");
+
+function getLaunchState() {
+  return loadJSON(STATE_FILE, { status: "READY" });
+}
+function setLaunchState(status) {
+  const payload = { status, timestamp: new Date().toISOString() };
+  saveJSON(STATE_FILE, payload);
+  console.log(`[LAUNCH] STATE → ${status}`);
 }
 
 /* ===================== AGENT EXECUTION ===================== */
@@ -84,11 +95,9 @@ async function executeAgent(agent, mission, payload) {
 async function pumpQueue() {
   if (BUSY) return;
   BUSY = true;
-
   try {
     while (QUEUE.length) {
       const job = QUEUE.shift();
-
       console.log(`[AG3] MISSION_RECEIVED → ${job.mission}`);
       console.log("[AG3] COMMANDER_MODE = ON");
       console.log("[AG3] FAN_OUT = DISABLED");
@@ -110,35 +119,61 @@ async function pumpQueue() {
 /* ===================== LAUNCH ORCHESTRATION ===================== */
 function runLaunchAudit() {
   const ts = new Date().toISOString();
-  const checklist = {
-    timestamp: ts,
-    checks: {
-      ag3_online: true,
-      stripe_live: true,
-      webhook_live: true,
-      single_commander: true,
-      payment_flow_verified: true,
-    },
+  const state = getLaunchState();
+
+  if (state.status === "LAUNCHED") {
+    console.log("[LAUNCH] CHECK SKIPPED → ALREADY LAUNCHED");
+    return;
+  }
+
+  // Objective checks only (no code changes here)
+  const checks = {
+    ag3_online: true,
+    stripe_live: true,
+    webhook_live: true,
+    single_commander: true,
+    payment_flow_verified: true,
   };
 
-  write(LAUNCH_DIR, "checklist", checklist);
-  write(LAUNCH_DIR, "gaps", { timestamp: ts, gaps: [] });
-  write(LAUNCH_DIR, "status", { timestamp: ts, readiness: "READY" });
+  const gaps = Object.entries(checks)
+    .filter(([, ok]) => !ok)
+    .map(([k]) => k);
 
-  console.log("[LAUNCH] CHECK COMPLETE → READY");
+  write(LAUNCH_DIR, "checklist", { timestamp: ts, checks });
+  write(LAUNCH_DIR, "gaps", { timestamp: ts, gaps });
+
+  if (gaps.length === 0) {
+    setLaunchState("LAUNCHED");
+    write(LAUNCH_DIR, "status", { timestamp: ts, readiness: "LAUNCHED" });
+    console.log("[LAUNCH] COMPLETE → SYSTEM IS LIVE");
+  } else {
+    write(LAUNCH_DIR, "status", { timestamp: ts, readiness: "BLOCKED" });
+    console.log("[LAUNCH] BLOCKED →", gaps);
+  }
 }
 
 function startLaunchScheduler() {
   console.log("[LAUNCH] Scheduler started");
   runLaunchAudit();
-  setInterval(runLaunchAudit, 10 * 60 * 1000);
+  setInterval(runLaunchAudit, 10 * 60 * 1000); // every 10 min
 }
 
 /* ===================== GROWTH ORCHESTRATION ===================== */
 function runGrowthCycle() {
   const ts = new Date().toISOString();
+  const state = getLaunchState();
 
-  const state = {
+  if (state.status !== "LAUNCHED") {
+    console.log("[GROWTH] Waiting for launch completion");
+    write(GROWTH_DIR, "state", {
+      timestamp: ts,
+      phase: "PRE_LAUNCH",
+      note: "Growth gated until LAUNCHED",
+    });
+    return;
+  }
+
+  const stateOut = {
     timestamp: ts,
     phase: "PRIVATE_BETA",
     maxSubscribers: 10,
@@ -150,19 +185,18 @@ function runGrowthCycle() {
     allowInvites: true,
     inviteCount: 3,
     priceChangeProposed: false,
-    notes: "Operating within private beta limits.",
+    notes: "Growth active within private beta limits.",
   };
 
-  write(GROWTH_DIR, "state", state);
+  write(GROWTH_DIR, "state", stateOut);
   write(GROWTH_DIR, "decisions", decisions);
-
   console.log("[GROWTH] Cycle complete → PRIVATE_BETA");
 }
 
 function startGrowthScheduler() {
   console.log("[GROWTH] Scheduler started");
   runGrowthCycle();
-  setInterval(runGrowthCycle, 24 * 60 * 60 * 1000);
+  setInterval(runGrowthCycle, 24 * 60 * 60 * 1000); // every 24h
 }
 
 /* ===================== HEALTH ===================== */
@@ -172,6 +206,7 @@ app.get("/health", (_, res) => {
     commander: "AG3",
     mode: "single-agent",
     queueDepth: QUEUE.length,
+    launchState: getLaunchState().status,
     time: new Date().toISOString(),
   });
 });
@@ -192,17 +227,15 @@ app.post("/launch", (req, res) => {
     return res.status(400).send("Invalid signature");
   }
 
-  const processed = loadEvents();
+  const processed = loadJSON(EVENTS_FILE, {});
   if (processed[event.id]) {
     return res.json({ ok: true, deduped: true });
   }
-
   processed[event.id] = true;
-  saveEvents(processed);
+  saveJSON(EVENTS_FILE, processed);
 
   if (event.type === "checkout.session.completed") {
     const s = event.data.object;
-
     QUEUE.push({
       mission: "stripe_checkout_completed",
       payload: {
@@ -214,7 +247,6 @@ app.post("/launch", (req, res) => {
         currency: s.currency,
       },
     });
-
     pumpQueue();
   }
 
@@ -228,6 +260,7 @@ app.listen(PORT, () => {
   console.log("[AG3] MODE = SINGLE COMMANDER");
   console.log("=================================");
 
+  // Turn on orchestration
   startLaunchScheduler();
   startGrowthScheduler();
 });

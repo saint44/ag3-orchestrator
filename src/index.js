@@ -1,11 +1,10 @@
 /**
- * AG3 ORCHESTRATOR — LIVE STRIPE + SINGLE COMMANDER
- * -------------------------------------------------
- * - Stripe webhook verified
- * - Idempotent
- * - Queue-based
- * - Single agent execution
- * - Safe defaults for live payloads
+ * AG3 ORCHESTRATOR — LIVE SAFE, SINGLE COMMANDER
+ * =============================================
+ * - Stripe live webhook safe
+ * - No task assumptions
+ * - No toLowerCase crashes
+ * - Deterministic single-agent execution
  */
 
 const express = require("express");
@@ -15,13 +14,13 @@ const Stripe = require("stripe");
 const fs = require("fs");
 const path = require("path");
 
-// -------------------- CONFIG --------------------
+/* ===================== CONFIG ===================== */
 const PORT = process.env.PORT || 10000;
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 
 if (!STRIPE_SECRET_KEY || !STRIPE_WEBHOOK_SECRET) {
-  console.error("[AG3] Missing Stripe environment variables");
+  console.error("[AG3] Missing Stripe env vars");
   process.exit(1);
 }
 
@@ -29,49 +28,44 @@ const stripe = new Stripe(STRIPE_SECRET_KEY, {
   apiVersion: "2025-07-30.basil",
 });
 
-// -------------------- APP --------------------
+/* ===================== APP ===================== */
 const app = express();
 app.use(cors());
 
-// Raw body ONLY for Stripe
+// RAW body ONLY for Stripe
 app.post("/launch", bodyParser.raw({ type: "application/json" }));
-
-// JSON for everything else
 app.use(express.json());
 
-// -------------------- STORAGE --------------------
+/* ===================== STORAGE ===================== */
 const DATA_DIR = path.join(process.cwd(), "data");
-const DB_FILE = path.join(DATA_DIR, "processed-events.json");
+const EVENTS_FILE = path.join(DATA_DIR, "processed-events.json");
 const LOG_FILE = path.join(DATA_DIR, "missions.log");
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-if (!fs.existsSync(DB_FILE)) {
-  fs.writeFileSync(DB_FILE, JSON.stringify({}));
+if (!fs.existsSync(EVENTS_FILE)) {
+  fs.writeFileSync(EVENTS_FILE, "{}");
 }
 
-function loadProcessed() {
-  return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+function loadEvents() {
+  return JSON.parse(fs.readFileSync(EVENTS_FILE, "utf8"));
 }
 
-function saveProcessed(data) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+function saveEvents(e) {
+  fs.writeFileSync(EVENTS_FILE, JSON.stringify(e, null, 2));
 }
 
-function log(line) {
+function audit(line) {
   fs.appendFileSync(LOG_FILE, line + "\n");
 }
 
-// -------------------- AGENT CONTROL --------------------
+/* ===================== AGENT CONTROL ===================== */
 const DEFAULT_AGENT = { id: "ag4" };
 const QUEUE = [];
 let BUSY = false;
 
-function selectSingleAgent(task) {
-  // LIVE-SAFE: Stripe events may not include a task string
-  if (!task || typeof task !== "string") {
-    return DEFAULT_AGENT;
-  }
+// NEVER assume task exists
+function selectSingleAgent() {
   return DEFAULT_AGENT;
 }
 
@@ -81,7 +75,7 @@ async function executeAgent(agent, mission, payload) {
     mission,
     status: "OK",
     payload,
-    timestamp: new Date().toISOString(),
+    ts: new Date().toISOString(),
   };
 }
 
@@ -98,28 +92,25 @@ async function pumpQueue() {
       console.log("[AG3] FAN_OUT = DISABLED");
       console.log("[AG3] RETRIES = DISABLED");
 
-      const agent = selectSingleAgent(job.task);
+      const agent = selectSingleAgent();
       console.log(`[AG3] COMMANDER → ${agent.id}`);
 
       const result = await executeAgent(agent, job.mission, job.payload);
 
-      console.log(`[AG3] RESULT ← ${agent.id}`);
       console.log("[AG3] MISSION_COMPLETE");
-
-      log(JSON.stringify(result));
+      audit(JSON.stringify(result));
     }
   } catch (err) {
-    console.error("[AG3] EXECUTION_ERROR", err);
+    console.error("[AG3] EXEC_ERROR", err);
   } finally {
     BUSY = false;
   }
 }
 
-// -------------------- HEALTH --------------------
-app.get("/health", (req, res) => {
+/* ===================== HEALTH ===================== */
+app.get("/health", (_, res) => {
   res.json({
     ok: true,
-    status: "running",
     commander: "AG3",
     mode: "single-agent",
     queueDepth: QUEUE.length,
@@ -127,11 +118,11 @@ app.get("/health", (req, res) => {
   });
 });
 
-// -------------------- STRIPE WEBHOOK --------------------
+/* ===================== STRIPE WEBHOOK ===================== */
 app.post("/launch", (req, res) => {
   const sig = req.headers["stripe-signature"];
-
   let event;
+
   try {
     event = stripe.webhooks.constructEvent(
       req.body,
@@ -139,50 +130,41 @@ app.post("/launch", (req, res) => {
       STRIPE_WEBHOOK_SECRET
     );
   } catch (err) {
-    console.error("[AG3] INVALID_SIGNATURE");
+    console.error("[AG3] INVALID SIGNATURE");
     return res.status(400).send("Invalid signature");
   }
 
-  const processed = loadProcessed();
+  const processed = loadEvents();
   if (processed[event.id]) {
     return res.json({ ok: true, deduped: true });
   }
 
   processed[event.id] = true;
-  saveProcessed(processed);
+  saveEvents(processed);
 
-  // Map Stripe → Mission
-  let mission = null;
-  let payload = {};
-
-  if (event.type === "checkout.session.completed") {
-    mission = "stripe_checkout_completed";
-    payload = {
-      eventId: event.id,
-      session: event.data.object.id,
-      customer: event.data.object.customer,
-      email: event.data.object.customer_details?.email,
-      amount: event.data.object.amount_total,
-      currency: event.data.object.currency,
-    };
-  }
-
-  if (!mission) {
+  if (event.type !== "checkout.session.completed") {
     return res.json({ ok: true, ignored: true });
   }
 
+  const s = event.data.object;
+
   QUEUE.push({
-    mission,
-    task: null, // LIVE SAFE
-    payload,
+    mission: "stripe_checkout_completed",
+    payload: {
+      eventId: event.id,
+      sessionId: s.id,
+      customer: s.customer,
+      email: s.customer_details?.email,
+      amount: s.amount_total,
+      currency: s.currency,
+    },
   });
 
   pumpQueue();
-
   res.json({ ok: true, queued: true });
 });
 
-// -------------------- START --------------------
+/* ===================== START ===================== */
 app.listen(PORT, () => {
   console.log("=================================");
   console.log("[AG3] ORCHESTRATOR ONLINE");

@@ -1,11 +1,12 @@
 /**
  * AG3 ORCHESTRATOR — EMPIRE MODE (LIVE)
  * ====================================
- * - Stripe LIVE webhook (raw body, signature safe)
+ * - Stripe LIVE webhook (raw body, signature-safe)
  * - Single-commander execution (AG3)
  * - Launch completion state machine
  * - Growth scheduler (post-launch)
  * - Parallel batch pillar deployment (full-service)
+ * - Outbound execution (rate-limited) for Automation Agency
  * - Observable artifacts written to disk
  */
 
@@ -34,28 +35,29 @@ const app = express();
 /**
  * IMPORTANT:
  * Use RAW body globally.
- * Never use express.json().
+ * Do NOT use express.json().
  * Stripe signature verification requires raw bytes.
  */
 app.use(express.raw({ type: "*/*" }));
 
 /* ===================== STORAGE ===================== */
-const DATA_DIR = path.join(process.cwd(), "data");
+const ROOT = process.cwd();
+const DATA_DIR = path.join(ROOT, "data");
 const EVENTS_FILE = path.join(DATA_DIR, "processed-events.json");
 const MISSIONS_LOG = path.join(DATA_DIR, "missions.log");
 
 const LAUNCH_DIR = path.join(DATA_DIR, "launch");
 const GROWTH_DIR = path.join(DATA_DIR, "growth");
 const PILLAR_DIR = path.join(DATA_DIR, "pillars");
+const OUTBOUND_DIR = path.join(DATA_DIR, "outbound");
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(LAUNCH_DIR, { recursive: true });
 fs.mkdirSync(GROWTH_DIR, { recursive: true });
 fs.mkdirSync(PILLAR_DIR, { recursive: true });
+fs.mkdirSync(OUTBOUND_DIR, { recursive: true });
 
-if (!fs.existsSync(EVENTS_FILE)) {
-  fs.writeFileSync(EVENTS_FILE, "{}");
-}
+if (!fs.existsSync(EVENTS_FILE)) fs.writeFileSync(EVENTS_FILE, "{}");
 
 function loadJSON(file, fallback) {
   if (!fs.existsSync(file)) return fallback;
@@ -66,6 +68,9 @@ function saveJSON(file, payload) {
 }
 function write(dir, name, payload) {
   saveJSON(path.join(dir, `${name}.json`), payload);
+}
+function append(file, line) {
+  fs.appendFileSync(file, line + "\n");
 }
 
 /* ===================== LAUNCH STATE ===================== */
@@ -98,25 +103,17 @@ async function executeAgent(agent, mission, payload) {
 async function pumpQueue() {
   if (BUSY) return;
   BUSY = true;
-
   try {
     while (QUEUE.length) {
       const job = QUEUE.shift();
-
       console.log(`[AG3] MISSION_RECEIVED → ${job.mission}`);
       console.log("[AG3] COMMANDER_MODE = ON");
       console.log("[AG3] FAN_OUT = DISABLED");
       console.log("[AG3] RETRIES = DISABLED");
       console.log(`[AG3] COMMANDER → ${DEFAULT_AGENT.id}`);
-
-      const result = await executeAgent(
-        DEFAULT_AGENT,
-        job.mission,
-        job.payload
-      );
-
+      const result = await executeAgent(DEFAULT_AGENT, job.mission, job.payload);
       console.log("[AG3] MISSION_COMPLETE");
-      fs.appendFileSync(MISSIONS_LOG, JSON.stringify(result) + "\n");
+      append(MISSIONS_LOG, JSON.stringify(result));
     }
   } catch (err) {
     console.error("[AG3] EXEC_ERROR", err);
@@ -129,7 +126,6 @@ async function pumpQueue() {
 function runLaunchAudit() {
   const ts = new Date().toISOString();
   const state = getLaunchState();
-
   if (state.status === "LAUNCHED") {
     console.log("[LAUNCH] CHECK SKIPPED → ALREADY LAUNCHED");
     return;
@@ -170,34 +166,27 @@ function startLaunchScheduler() {
 function runGrowthCycle() {
   const ts = new Date().toISOString();
   const state = getLaunchState();
-
   if (state.status !== "LAUNCHED") {
-    write(GROWTH_DIR, "state", {
-      timestamp: ts,
-      phase: "PRE_LAUNCH",
-      note: "Growth gated until LAUNCHED",
-    });
+    write(GROWTH_DIR, "state", { timestamp: ts, phase: "PRE_LAUNCH" });
     console.log("[GROWTH] Waiting for launch completion");
     return;
   }
 
-  const stateOut = {
+  write(GROWTH_DIR, "state", {
     timestamp: ts,
     phase: "PRIVATE_BETA",
     maxSubscribers: 10,
     currentSubscribers: "AUTO-DETECT",
-  };
+  });
 
-  const decisions = {
+  write(GROWTH_DIR, "decisions", {
     timestamp: ts,
     allowInvites: true,
     inviteCount: 3,
     priceChangeProposed: false,
     notes: "Growth active within private beta limits.",
-  };
+  });
 
-  write(GROWTH_DIR, "state", stateOut);
-  write(GROWTH_DIR, "decisions", decisions);
   console.log("[GROWTH] Cycle complete → PRIVATE_BETA");
 }
 
@@ -240,7 +229,7 @@ const PILLARS = [
 
 async function deployPillar(pillar) {
   const ts = new Date().toISOString();
-  const state = {
+  saveJSON(path.join(PILLAR_DIR, `${pillar.id}.json`), {
     id: pillar.id,
     name: pillar.name,
     type: pillar.type,
@@ -250,23 +239,68 @@ async function deployPillar(pillar) {
     price: pillar.price,
     marketing: pillar.marketing,
     fulfillment: pillar.fulfillment,
-  };
-
-  saveJSON(path.join(PILLAR_DIR, `${pillar.id}.json`), state);
+  });
   console.log(`[PILLAR] DEPLOYED → ${pillar.name}`);
 }
 
 async function deployPillarBatch() {
   console.log("[PILLAR] Deploying parallel batch...");
-  for (const pillar of PILLARS) {
-    await deployPillar(pillar);
-  }
+  for (const p of PILLARS) await deployPillar(p);
   console.log("[PILLAR] Batch deployment complete");
 }
 
 function startPillarScheduler() {
   console.log("[PILLAR] Scheduler started (parallel batch)");
   deployPillarBatch();
+}
+
+/* ===================== OUTBOUND (AUTOMATION AGENCY ONLY) ===================== */
+const DAILY_CAP = 5;
+const TODAY_FILE = path.join(OUTBOUND_DIR, "today.json");
+const OUT_LOG = path.join(OUTBOUND_DIR, "log.jsonl");
+
+function loadToday() {
+  if (!fs.existsSync(TODAY_FILE)) {
+    return { date: new Date().toDateString(), sent: 0 };
+  }
+  return JSON.parse(fs.readFileSync(TODAY_FILE, "utf8"));
+}
+function saveToday(t) {
+  saveJSON(TODAY_FILE, t);
+}
+function genLeads(n) {
+  // SAFE placeholder — replace with real source later
+  return Array.from({ length: n }).map((_, i) => ({
+    email: `lead_${Date.now()}_${i}@example.com`,
+    source: "seed",
+  }));
+}
+function runOutbound() {
+  const today = loadToday();
+  if (today.sent >= DAILY_CAP) {
+    console.log("[OUTBOUND] Daily cap reached");
+    return;
+  }
+  const remaining = DAILY_CAP - today.sent;
+  const leads = genLeads(remaining);
+  for (const lead of leads) {
+    append(OUT_LOG, JSON.stringify({
+      ts: new Date().toISOString(),
+      pillar: "automation_agency",
+      action: "OUTBOUND_ATTEMPT",
+      lead,
+      status: "QUEUED",
+    }));
+    today.sent += 1;
+    console.log(`[OUTBOUND] Queued outreach → ${lead.email}`);
+  }
+  saveToday(today);
+  console.log(`[OUTBOUND] Cycle complete (${today.sent}/${DAILY_CAP})`);
+}
+function startOutboundScheduler() {
+  console.log("[OUTBOUND] Scheduler started (automation_agency only)");
+  runOutbound();
+  setInterval(runOutbound, 24 * 60 * 60 * 1000);
 }
 
 /* ===================== HEALTH ===================== */
@@ -285,22 +319,15 @@ app.get("/health", (_, res) => {
 app.post("/launch", (req, res) => {
   const sig = req.headers["stripe-signature"];
   let event;
-
   try {
-    event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      STRIPE_WEBHOOK_SECRET
-    );
-  } catch (err) {
+    event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+  } catch {
     console.error("[AG3] INVALID SIGNATURE");
     return res.status(400).send("Invalid signature");
   }
 
   const processed = loadJSON(EVENTS_FILE, {});
-  if (processed[event.id]) {
-    return res.json({ ok: true, deduped: true });
-  }
+  if (processed[event.id]) return res.json({ ok: true, deduped: true });
   processed[event.id] = true;
   saveJSON(EVENTS_FILE, processed);
 
@@ -319,7 +346,6 @@ app.post("/launch", (req, res) => {
     });
     pumpQueue();
   }
-
   res.json({ ok: true });
 });
 
@@ -329,8 +355,8 @@ app.listen(PORT, () => {
   console.log("[AG3] ORCHESTRATOR ONLINE");
   console.log("[AG3] MODE = SINGLE COMMANDER");
   console.log("=================================");
-
   startLaunchScheduler();
   startGrowthScheduler();
   startPillarScheduler();
+  startOutboundScheduler(); // 🔥 outbound ON (automation_agency)
 });

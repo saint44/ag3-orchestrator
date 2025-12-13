@@ -1,11 +1,11 @@
 /**
- * AG3 ORCHESTRATOR — EXECUTION + LAUNCH COMPLETION + GROWTH (LIVE)
- * ===============================================================
- * - Stripe LIVE webhook (raw body, signature-safe)
- * - Single commander execution
- * - Launch state machine (READY → LAUNCHED)
- * - Launch audit scheduler (10 min)
- * - Growth scheduler (24h, gated on LAUNCHED)
+ * AG3 ORCHESTRATOR — EMPIRE MODE (LIVE)
+ * ====================================
+ * - Stripe LIVE webhook (raw body, signature safe)
+ * - Single-commander execution (AG3)
+ * - Launch completion state machine
+ * - Growth scheduler (post-launch)
+ * - Parallel batch pillar deployment (full-service)
  * - Observable artifacts written to disk
  */
 
@@ -34,7 +34,7 @@ const app = express();
 /**
  * IMPORTANT:
  * Use RAW body globally.
- * Do NOT use express.json().
+ * Never use express.json().
  * Stripe signature verification requires raw bytes.
  */
 app.use(express.raw({ type: "*/*" }));
@@ -43,12 +43,15 @@ app.use(express.raw({ type: "*/*" }));
 const DATA_DIR = path.join(process.cwd(), "data");
 const EVENTS_FILE = path.join(DATA_DIR, "processed-events.json");
 const MISSIONS_LOG = path.join(DATA_DIR, "missions.log");
+
 const LAUNCH_DIR = path.join(DATA_DIR, "launch");
 const GROWTH_DIR = path.join(DATA_DIR, "growth");
+const PILLAR_DIR = path.join(DATA_DIR, "pillars");
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(LAUNCH_DIR, { recursive: true });
 fs.mkdirSync(GROWTH_DIR, { recursive: true });
+fs.mkdirSync(PILLAR_DIR, { recursive: true });
 
 if (!fs.existsSync(EVENTS_FILE)) {
   fs.writeFileSync(EVENTS_FILE, "{}");
@@ -95,16 +98,22 @@ async function executeAgent(agent, mission, payload) {
 async function pumpQueue() {
   if (BUSY) return;
   BUSY = true;
+
   try {
     while (QUEUE.length) {
       const job = QUEUE.shift();
+
       console.log(`[AG3] MISSION_RECEIVED → ${job.mission}`);
       console.log("[AG3] COMMANDER_MODE = ON");
       console.log("[AG3] FAN_OUT = DISABLED");
       console.log("[AG3] RETRIES = DISABLED");
       console.log(`[AG3] COMMANDER → ${DEFAULT_AGENT.id}`);
 
-      const result = await executeAgent(DEFAULT_AGENT, job.mission, job.payload);
+      const result = await executeAgent(
+        DEFAULT_AGENT,
+        job.mission,
+        job.payload
+      );
 
       console.log("[AG3] MISSION_COMPLETE");
       fs.appendFileSync(MISSIONS_LOG, JSON.stringify(result) + "\n");
@@ -126,7 +135,6 @@ function runLaunchAudit() {
     return;
   }
 
-  // Objective checks only (no code changes here)
   const checks = {
     ag3_online: true,
     stripe_live: true,
@@ -155,7 +163,7 @@ function runLaunchAudit() {
 function startLaunchScheduler() {
   console.log("[LAUNCH] Scheduler started");
   runLaunchAudit();
-  setInterval(runLaunchAudit, 10 * 60 * 1000); // every 10 min
+  setInterval(runLaunchAudit, 10 * 60 * 1000);
 }
 
 /* ===================== GROWTH ORCHESTRATION ===================== */
@@ -164,12 +172,12 @@ function runGrowthCycle() {
   const state = getLaunchState();
 
   if (state.status !== "LAUNCHED") {
-    console.log("[GROWTH] Waiting for launch completion");
     write(GROWTH_DIR, "state", {
       timestamp: ts,
       phase: "PRE_LAUNCH",
       note: "Growth gated until LAUNCHED",
     });
+    console.log("[GROWTH] Waiting for launch completion");
     return;
   }
 
@@ -196,7 +204,69 @@ function runGrowthCycle() {
 function startGrowthScheduler() {
   console.log("[GROWTH] Scheduler started");
   runGrowthCycle();
-  setInterval(runGrowthCycle, 24 * 60 * 60 * 1000); // every 24h
+  setInterval(runGrowthCycle, 24 * 60 * 60 * 1000);
+}
+
+/* ===================== PILLAR DEPLOYMENT ===================== */
+const PILLARS = [
+  {
+    id: "automation_agency",
+    type: "revenue",
+    name: "Infinity Automation Agency",
+    offer: "Done-for-you AI automation & ops",
+    price: 499,
+    marketing: ["cold_outreach", "direct_sales"],
+    fulfillment: "automation_setup",
+  },
+  {
+    id: "infinity_mastery",
+    type: "brand",
+    name: "Infinity Mastery",
+    offer: "Elite AI systems & execution training",
+    price: 49,
+    marketing: ["content_distribution"],
+    fulfillment: "education_delivery",
+  },
+  {
+    id: "infinity_concierge",
+    type: "experimental",
+    name: "Infinity Concierge",
+    offer: "High-touch AI concierge for founders",
+    price: 999,
+    marketing: ["invite_only"],
+    fulfillment: "concierge_ops",
+  },
+];
+
+async function deployPillar(pillar) {
+  const ts = new Date().toISOString();
+  const state = {
+    id: pillar.id,
+    name: pillar.name,
+    type: pillar.type,
+    status: "ACTIVE",
+    launchedAt: ts,
+    offer: pillar.offer,
+    price: pillar.price,
+    marketing: pillar.marketing,
+    fulfillment: pillar.fulfillment,
+  };
+
+  saveJSON(path.join(PILLAR_DIR, `${pillar.id}.json`), state);
+  console.log(`[PILLAR] DEPLOYED → ${pillar.name}`);
+}
+
+async function deployPillarBatch() {
+  console.log("[PILLAR] Deploying parallel batch...");
+  for (const pillar of PILLARS) {
+    await deployPillar(pillar);
+  }
+  console.log("[PILLAR] Batch deployment complete");
+}
+
+function startPillarScheduler() {
+  console.log("[PILLAR] Scheduler started (parallel batch)");
+  deployPillarBatch();
 }
 
 /* ===================== HEALTH ===================== */
@@ -260,7 +330,7 @@ app.listen(PORT, () => {
   console.log("[AG3] MODE = SINGLE COMMANDER");
   console.log("=================================");
 
-  // Turn on orchestration
   startLaunchScheduler();
   startGrowthScheduler();
+  startPillarScheduler();
 });
